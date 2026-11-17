@@ -1,18 +1,8 @@
-import { loadConfig, missingConfig } from './config/env.js'
-import { createSupabase, createMainApi } from './lib/clients.js'
-import { createAccessStore } from './services/accessStore.js'
-import { createSubscriptionStore } from './services/subscriptionStore.js'
-import { createApp } from './app.js'
+// Local / any Node host: `npm run dev` or `npm start` → http://localhost:4000
+import { buildServer } from './build.js'
 import { log } from './lib/log.js'
 
-const config = loadConfig()
-const missing = missingConfig(config)
-const supabase = createSupabase(config)
-const store = supabase ? createAccessStore(supabase, config) : null
-const subscriptions = supabase ? createSubscriptionStore(supabase, config) : null
-const mainApi = createMainApi(config)
-
-const app = createApp({ store, subscriptions, mainApi, config, missing })
+const { app, config, missing } = buildServer()
 
 app.listen(config.port, () => {
   log('server.start', { port: config.port, subscriptionWrites: config.allowSubscriptionWrites, allowedOrigins: config.allowedOrigins, missingConfig: missing })
