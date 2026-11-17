@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../mocktest-web-main"
+		},
+		{
+			"path": "."
+		},
+		{
+			"path": "../admin-panel"
+		}
+	],
+	"settings": {}
+}
