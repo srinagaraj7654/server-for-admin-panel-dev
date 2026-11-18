@@ -9,7 +9,10 @@ export function loadConfig(env = process.env) {
     // Secret (server-only) key: new Supabase name SUPABASE_SECRET_KEY (sb_secret_…);
     // SUPABASE_SERVICE_ROLE_KEY still accepted for older setups.
     supabaseServiceRoleKey: env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY || '',
-    supabasePublishableKey: env.SUPABASE_PUBLISHABLE_KEY || '',   // not used yet (kept for later)
+    supabasePublishableKey: env.SUPABASE_PUBLISHABLE_KEY || '',   // user-facing sign-in (login, refresh, reset, Google/Apple)
+    // Random secret that seals the Google/Apple sign-in state and the 60-second sign-in code. Without it,
+    // Google/Apple sign-in through the server is off (email + password still works).
+    authStateSecret: env.AUTH_STATE_SECRET || '',
     supabaseJwksUrl: env.SUPABASE_JWKS_URL || '',                  // not used yet (local JWT verification later)
     superAdminEmails: list(env.SUPER_ADMIN_EMAILS).map((e) => e.toLowerCase()),
     allowedOrigins: list(env.ALLOWED_ORIGINS || 'http://localhost:3000'),

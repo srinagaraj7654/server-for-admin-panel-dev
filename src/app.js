@@ -8,6 +8,7 @@ import { accessRoutes } from './routes/access.js'
 import { adminRoutes } from './routes/admin.js'
 import { subscriptionRoutes } from './routes/subscriptions.js'
 import { authRoutes } from './routes/auth.js'
+import { studentRoutes, publicRoutes } from './routes/student.js'
 import { AccessError } from './services/accessStore.js'
 import { log } from './lib/log.js'
 
@@ -18,7 +19,7 @@ import { log } from './lib/log.js'
  *   config  — loadConfig() result
  *   missing — list of missing env settings (shown by /health)
  */
-export function createApp({ store, subscriptions = null, mainApi, config, missing = [] }) {
+export function createApp({ store, subscriptions = null, authService = null, students = null, mainApi, config, missing = [] }) {
   const app = express()
   app.disable('x-powered-by')
   app.set('trust proxy', 1)
@@ -28,7 +29,7 @@ export function createApp({ store, subscriptions = null, mainApi, config, missin
     allowedHeaders: ['Content-Type', 'Authorization'],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
   }))
-  app.use(express.json({ limit: '1mb' }))
+  app.use(express.json({ limit: '4mb' }))   // big test results (result_json); Vercel's request limit is 4.5 MB
   app.use('/api', rateLimit({ windowMs: 60_000, limit: 300, standardHeaders: 'draft-7', legacyHeaders: false }))
 
   app.get('/health', (_req, res) => res.json({ ok: true, service: 'mocktest-admin-access', missingConfig: missing }))
@@ -37,8 +38,10 @@ export function createApp({ store, subscriptions = null, mainApi, config, missin
     app.use('/api', (_req, res) => res.status(503).json({ error: `Admin server not configured: ${missing.join(', ')}` }))
   } else {
     const auth = makeAuth(store)
-    app.use('/api/auth', authRoutes({ store, config }))   // public: admin-only password reset
+    app.use('/api/auth', authRoutes({ store, config, authService, auth }))   // sign-in, session, passwords, Google/Apple
     app.use('/api/me', meRoutes({ auth, store }))
+    if (students) app.use('/api/me', studentRoutes({ auth, students }))      // website data (own rows only)
+    if (students) app.use('/api/public', publicRoutes({ students }))         // logged-out pages
     app.use('/api/access', accessRoutes({ auth, store }))
     app.use('/api/admin', adminRoutes({ auth, mainApi }))
     if (subscriptions) app.use('/api/subscriptions', subscriptionRoutes({ auth, subscriptions }))   // super admin only

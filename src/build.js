@@ -5,6 +5,8 @@ import { loadConfig, missingConfig } from './config/env.js'
 import { createSupabase, createMainApi } from './lib/clients.js'
 import { createAccessStore } from './services/accessStore.js'
 import { createSubscriptionStore } from './services/subscriptionStore.js'
+import { createAuthService } from './services/authService.js'
+import { createStudentStore } from './services/studentStore.js'
 import { createApp } from './app.js'
 
 export function buildServer() {
@@ -13,7 +15,9 @@ export function buildServer() {
   const supabase = createSupabase(config)
   const store = supabase ? createAccessStore(supabase, config) : null
   const subscriptions = supabase ? createSubscriptionStore(supabase, config) : null
+  const authService = supabase ? createAuthService(supabase, config) : null
+  const students = supabase ? createStudentStore(supabase) : null
   const mainApi = createMainApi(config)
-  const app = createApp({ store, subscriptions, mainApi, config, missing })
+  const app = createApp({ store, subscriptions, authService, students, mainApi, config, missing })
   return { app, config, missing }
 }

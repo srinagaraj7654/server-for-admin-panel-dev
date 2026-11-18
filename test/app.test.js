@@ -2,6 +2,7 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createApp } from '../src/app.js'
+import { AccessError } from '../src/services/accessStore.js'
 import { domainOfExam } from '../src/config/domains.js'
 import { buildSubscribers, pickCurrent, createSubscriptionStore } from '../src/services/subscriptionStore.js'
 
@@ -16,6 +17,7 @@ const calls = []
 const store = {
   getUserFromToken: async (t) => USERS[t] ? { id: USERS[t].id, email: USERS[t].email, app_metadata: { must_change_password: !!USERS[t].temp } } : null,
   setPermanentPassword: async (u, p) => { calls.push(['pw', u.email, p]); return { ok: true } },
+  sendPasswordReset: async (email, redirectTo) => { calls.push(['reset-student', email, redirectTo]); return { sent: true } },
   sendAdminPasswordReset: async (email, redirectTo) => { calls.push(['reset', email, redirectTo]); return { sent: email.endsWith('@arkaserve.com') } },
   getAccess: async (u) => Object.values(USERS).find((x) => x.id === u.id).access,
   listAdmins: async () => [{ email: 'bank@arkaserve.com', role: 'admin', domains: ['banking'] }],
@@ -35,6 +37,30 @@ const mainApi = {
   },
   request: async ({ method, url, data }) => { calls.push([method.toUpperCase(), url, data]); return { status: 200, data: { ok: true } } },
 }
+// fake auth service: password "good" works; tokens are the USERS keys above
+const byEmail = (e) => Object.entries(USERS).find(([, u]) => u.email === e)
+const authService = {
+  login: async (email, password) => {
+    const hit = byEmail(email); if (!hit || password !== 'good') throw new AccessError(401, 'Invalid email or password')
+    return { session: { access_token: hit[0], refresh_token: 'rt-' + hit[0], expires_at: 9999999999 }, user: { id: hit[1].id, email, app_metadata: {} } }
+  },
+  revoke: async (t, scope) => { calls.push(['revoke', t, scope]) },
+  refresh: async (rt) => { if (!rt.startsWith('rt-tok-')) throw new AccessError(401, 'Session expired — please sign in again'); return { session: { access_token: rt.slice(3), refresh_token: rt, expires_at: 1 }, user: {} } },
+  userFromToken: async (t) => USERS[t] ? { id: USERS[t].id, email: USERS[t].email, user_metadata: { full_name: 'X' }, app_metadata: {} } : null,
+  oauthStart: async (provider, o) => { calls.push(['oauth-start', provider, o.returnTo, o.callbackUrl]); return { url: 'https://example.supabase.co/auth/v1/authorize?provider=' + provider, cookie: 'SEALED' } },
+  oauthCallback: async (code, cookie) => { if (cookie !== 'SEALED') throw new AccessError(400, 'Sign-in expired'); return { code: 'C'.repeat(40), returnTo: 'http://localhost:3000/dashboard' } },
+  redeem: async (code) => { if (code !== 'C'.repeat(40)) throw new AccessError(400, 'Sign-in link expired'); return { session: { access_token: 'tok-student', refresh_token: 'rt-tok-student' }, user: { id: USERS['tok-student'].id, email: 'kid@gmail.com', app_metadata: {} } } },
+}
+// fake student store: records what the routes pass in
+const students = new Proxy({}, { get: (_t, name) => async (...args) => {
+  calls.push(['students.' + String(name), ...args])
+  if (name === 'listResults') return [{ id: 'r1' }]
+  if (name === 'currentAffairs') return [{ id: 'ca1' }]
+  if (name === 'currentAffairsCount') return 7
+  if (name === 'previousPapers') return [{ id: 'pp1' }]
+  if (name === 'saveAvatar') return { url: 'https://x/avatar.png', user: {} }
+  return { ok: true, user: { id: args[0] } }
+} })
 const subscriptions = {
   listSubscribers: async () => ({ subscribers: [{ id: 'u1', plan: 'pro' }], writable: false }),
   updateSubscription: async (id, c) => { calls.push(['sub', id, c]); return { userId: id, action: 'update' } },
@@ -43,7 +69,7 @@ const config = { allowedOrigins: ['http://localhost:3000'] }
 
 let server, base
 before(async () => {
-  server = createApp({ store, subscriptions, mainApi, config }).listen(0)
+  server = createApp({ store, subscriptions, authService, students, mainApi, config }).listen(0)
   await new Promise((r) => server.once('listening', r))
   base = `http://127.0.0.1:${server.address().port}`
 })
@@ -263,4 +289,132 @@ test('recovery sign-in (amr=recovery) may set a new password; normal sign-in may
   assert.equal((await set(pwTok)).status, 400)                                  // already has a password
   assert.equal((await set(recTok)).status, 200)
   assert.deepEqual(calls.filter((c) => c[0] === 'pw').at(-1), ['pw', 'bank@arkaserve.com', 'Recover2026'])
+})
+
+// ── Auth API (sign-in on the server) ───────────────────────────────────────
+import { makeSealer } from '../src/services/authService.js'
+const post = (path, body, token) => call(path, { method: 'POST', body, token })
+
+test('login: admin app accepts admins, rejects non-admins without handing out a session', async () => {
+  const ok = await post('/api/auth/login', { email: 'bank@arkaserve.com', password: 'good', app: 'admin' })
+  assert.equal(ok.status, 200)
+  const j = await ok.json(); assert.equal(j.session.access_token, 'tok-banking'); assert.equal(j.access.role, 'admin')
+  const no = await post('/api/auth/login', { email: 'kid@gmail.com', password: 'good', app: 'admin' })
+  assert.equal(no.status, 403)
+  const nj = await no.json(); assert.equal(nj.code, 'NOT_ADMIN'); assert.equal(nj.session, undefined)
+  assert.ok(calls.some((c) => c[0] === 'revoke' && c[1] === 'tok-student'))      // the student session was revoked
+  assert.equal((await post('/api/auth/login', { email: 'kid@gmail.com', password: 'good', app: 'student' })).status, 200)
+})
+
+test('login: wrong password / bad input', async () => {
+  assert.equal((await post('/api/auth/login', { email: 'bank@arkaserve.com', password: 'nope', app: 'admin' })).status, 401)
+  assert.equal((await post('/api/auth/login', { email: 'not-email', password: 'x' })).status, 400)
+  assert.equal((await post('/api/auth/login', { email: 'a@b.com', password: '' })).status, 400)
+})
+
+test('refresh, me, logout', async () => {
+  const r = await post('/api/auth/refresh', { refresh_token: 'rt-tok-banking' }); assert.equal(r.status, 200)
+  assert.equal((await r.json()).session.access_token, 'tok-banking')
+  assert.equal((await post('/api/auth/refresh', { refresh_token: 'rt-garbage-token' })).status, 401)
+  const me = await call('/api/auth/me', { token: 'tok-student' }); assert.equal(me.status, 200)
+  const mj = await me.json(); assert.equal(mj.user.email, 'kid@gmail.com'); assert.equal(mj.access.role, 'student')
+  assert.equal((await call('/api/auth/me')).status, 401)
+  assert.equal((await post('/api/auth/logout', { scope: 'global' }, 'tok-student')).status, 200)
+  assert.deepEqual(calls.filter((c) => c[0] === 'revoke').at(-1), ['revoke', 'tok-student', 'global'])
+})
+
+test('password: signed-in user can set a password that follows the rules', async () => {
+  assert.equal((await post('/api/auth/password', { password: 'short1' }, 'tok-student')).status, 400)
+  assert.equal((await post('/api/auth/password', { password: 'GoodPass2026' })).status, 401)
+  assert.equal((await post('/api/auth/password', { password: 'GoodPass2026' }, 'tok-student')).status, 200)
+})
+
+test('forgot password: website mode resets any account, admin mode stays admin-only', async () => {
+  // another IP (X-Forwarded-For; app trusts 1 proxy) so the earlier rate-limit test does not count
+  const s = await fetch(base + '/api/auth/forgot-password', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '10.9.9.9' }, body: JSON.stringify({ email: 'kid@gmail.com', app: 'student' }) })
+  assert.equal(s.status, 200); assert.match((await s.json()).message, /If an account exists/)
+  assert.ok(calls.some((c) => c[0] === 'reset-student' && c[1] === 'kid@gmail.com'))
+})
+
+test('google: start redirects to Supabase with a sealed cookie; return address must be allowed', async () => {
+  const st = await fetch(base + '/api/auth/oauth/google/start?return=' + encodeURIComponent('http://localhost:3000/dashboard'), { redirect: 'manual' })
+  assert.equal(st.status, 302)
+  assert.match(st.headers.get('location'), /authorize\?provider=google/)
+  assert.match(st.headers.get('set-cookie'), /mt_oauth=SEALED;.*HttpOnly/)
+  const evil = await fetch(base + '/api/auth/oauth/google/start?return=' + encodeURIComponent('https://evil.example/'), { redirect: 'manual' })
+  assert.equal(evil.status, 302)
+  assert.equal(calls.filter((c) => c[0] === 'oauth-start').at(-1)[2], 'http://localhost:3000')   // falls back to the allowed site
+  assert.equal((await fetch(base + '/api/auth/oauth/github/start', { redirect: 'manual' })).status, 400)
+})
+
+test('google: callback hands back a sealed code in the URL fragment; redeem gives the session', async () => {
+  const cb = await fetch(base + '/api/auth/oauth/callback?code=abc', { redirect: 'manual', headers: { Cookie: 'mt_oauth=SEALED' } })
+  assert.equal(cb.status, 302)
+  assert.equal(cb.headers.get('location'), 'http://localhost:3000/dashboard#mt_auth=' + 'C'.repeat(40))
+  const noCookie = await fetch(base + '/api/auth/oauth/callback?code=abc', { redirect: 'manual' })
+  assert.match(noCookie.headers.get('location'), /^http:\/\/localhost:3000#mt_auth_error=/)
+  const red = await post('/api/auth/oauth/redeem', { code: 'C'.repeat(40) }); assert.equal(red.status, 200)
+  assert.equal((await red.json()).session.access_token, 'tok-student')
+  assert.equal((await post('/api/auth/oauth/redeem', { code: 'D'.repeat(40) })).status, 400)
+})
+
+test('sealer: round-trips, rejects tampering, other secrets and expiry; off without a secret', async () => {
+  const s = makeSealer('test-secret'); const t = s.seal({ a: 1 }, 60)
+  assert.deepEqual(s.open(t), { a: 1 })
+  const flipped = t.slice(0, 20) + (t[20] === 'A' ? 'B' : 'A') + t.slice(21)
+  assert.equal(s.open(flipped), null)
+  assert.equal(makeSealer('other-secret').open(t), null)
+  assert.equal(s.open(s.seal({ a: 1 }, -1)), null)
+  assert.throws(() => makeSealer('').seal({}, 60), (e) => e.status === 503)
+})
+
+// ── Website data through the server (own rows only) ────────────────────────
+const lastCall = (name) => calls.filter((c) => c[0] === 'students.' + name).at(-1)
+const KID = USERS['tok-student'].id
+
+test('student data needs a sign-in; public pages do not', async () => {
+  assert.equal((await call('/api/me/results')).status, 401)
+  assert.equal((await call('/api/me/metadata', { method: 'PATCH', body: { full_name: 'X' } })).status, 401)
+  const ca = await call('/api/public/current-affairs?from=2026-11-01&category=economy'); assert.equal(ca.status, 200)
+  assert.deepEqual(lastCall('currentAffairs')[1], { from: '2026-11-01', category: 'economy', exam: undefined })
+  assert.equal((await (await call('/api/public/current-affairs?countDate=2026-11-18')).json()).count, 7)
+  assert.equal((await call('/api/public/previous-papers')).status, 200)
+})
+
+test('metadata: allowed fields saved for the signed-in user; plan / avatar / unknown fields refused', async () => {
+  const ok = await call('/api/me/metadata', { token: 'tok-student', method: 'PATCH', body: { full_name: 'Kid', target_exam: 'ssc_cgl', onboarding_complete: true } })
+  assert.equal(ok.status, 200)
+  assert.deepEqual(lastCall('updateMetadata'), ['students.updateMetadata', KID, { full_name: 'Kid', target_exam: 'ssc_cgl', onboarding_complete: true }])
+  for (const body of [{ plan: 'ultimate' }, { subscription: 'pro' }, { plan_expires: '2099-01-01' }, { avatar_url: 'https://evil' }, { role: 'super_admin' }, { dob: '01/02/2005' }]) {
+    assert.equal((await call('/api/me/metadata', { token: 'tok-student', method: 'PATCH', body })).status, 400, JSON.stringify(body))
+  }
+})
+
+test('results: server sets student_id (browser value ignored); filters passed safely', async () => {
+  const r = await call('/api/me/results', { token: 'tok-student', method: 'POST', body: { exam: 'ssc_cgl', total_score: 10, student_id: 'someone-else' } })
+  assert.equal(r.status, 201)
+  const [, uid, row] = lastCall('addResult'); assert.equal(uid, KID); assert.equal(row.student_id, undefined)
+  assert.equal((await call('/api/me/results', { token: 'tok-student', method: 'POST', body: { total_score: 1 } })).status, 400)   // exam required
+  await call('/api/me/results?limit=500&examPrefixes=sat,act,bad%25x', { token: 'tok-student' })
+  assert.deepEqual(lastCall('listResults'), ['students.listResults', KID, { limit: 100, exam: undefined, examPrefixes: ['sat', 'act'] }])
+})
+
+test('study plan, onboarding, profile, data delete, topic stats are scoped to the signed-in user', async () => {
+  assert.equal((await call('/api/me/study-plan', { token: 'tok-student', method: 'PUT', body: { exam_id: 'ssc_cgl', hours_per_day: 3, plan_json: { a: 1 }, user_id: 'x' } })).status, 200)
+  assert.deepEqual(lastCall('replaceStudyPlan'), ['students.replaceStudyPlan', KID, { exam_id: 'ssc_cgl', hours_per_day: 3, plan_json: { a: 1 } }])
+  assert.equal((await call('/api/me/study-plan', { token: 'tok-student', method: 'PATCH', body: {} })).status, 400)
+  assert.equal((await call('/api/me/onboarding', { token: 'tok-student', method: 'PUT', body: { phone: '+91 98765 43210', onboarding_done: true } })).status, 200)
+  assert.equal((await call('/api/me/profile', { token: 'tok-student', method: 'PUT', body: { full_name: 'Kid', id: 'x' } })).status, 200)
+  assert.deepEqual(lastCall('upsertProfile'), ['students.upsertProfile', KID, { full_name: 'Kid' }])
+  assert.equal((await call('/api/me/data', { token: 'tok-student', method: 'DELETE' })).status, 200)
+  assert.equal(lastCall('deleteMyData')[1], KID)
+  assert.equal((await call('/api/me/topic-stats', { token: 'tok-student' })).status, 200)
+})
+
+test('avatar: images only, 4 MB max', async () => {
+  const up = (type, size) => { const fd = new FormData(); fd.append('file', new Blob([new Uint8Array(size)], { type }), 'a.' + type.split('/')[1]); return fetch(base + '/api/me/avatar', { method: 'POST', headers: { Authorization: 'Bearer tok-student' }, body: fd }) }
+  assert.equal((await up('image/png', 1000)).status, 200)
+  assert.equal(lastCall('saveAvatar')[2].ext, 'png')
+  assert.equal((await up('application/pdf', 1000)).status, 400)
+  assert.equal((await up('image/png', 5 * 1024 * 1024)).status, 413)
 })

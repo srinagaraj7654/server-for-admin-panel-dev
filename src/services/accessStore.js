@@ -183,6 +183,16 @@ export function createAccessStore(supabase, config) {
     return error ? { sent: false, reason: 'supabase', message: error.message } : { sent: true }
   }
 
+  /** Website "Forgot password?": reset email for any existing account (route answers the same for every email). */
+  async function sendPasswordReset(email, redirectTo) {
+    const user = await findUserByEmail(email)
+    if (!user) return { sent: false, reason: 'no-account' }
+    if (!config.supabasePublishableKey) return { sent: false, reason: 'no-publishable-key' }
+    const anon = createClient(config.supabaseUrl, config.supabasePublishableKey, { auth: { persistSession: false, autoRefreshToken: false } })
+    const { error } = await anon.auth.resetPasswordForEmail(user.email, { redirectTo })
+    return error ? { sent: false, reason: 'supabase', message: error.message } : { sent: true }
+  }
+
   /** True if `password` is the account's CURRENT password (used to stop re-using the temporary one). */
   async function isCurrentPassword(email, password) {
     if (!config.supabasePublishableKey) return false
@@ -223,5 +233,5 @@ export function createAccessStore(supabase, config) {
     return data[0]
   }
 
-  return { getUserFromToken, getAccess, searchUsers, listAdmins, grantAdmin, createAdmin, setPermanentPassword, sendAdminPasswordReset, updateDomains, revokeAdmin }
+  return { getUserFromToken, getAccess, searchUsers, listAdmins, grantAdmin, createAdmin, setPermanentPassword, sendAdminPasswordReset, sendPasswordReset, updateDomains, revokeAdmin }
 }
