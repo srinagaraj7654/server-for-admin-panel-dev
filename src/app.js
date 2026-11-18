@@ -7,6 +7,7 @@ import { meRoutes } from './routes/me.js'
 import { accessRoutes } from './routes/access.js'
 import { adminRoutes } from './routes/admin.js'
 import { subscriptionRoutes } from './routes/subscriptions.js'
+import { authRoutes } from './routes/auth.js'
 import { AccessError } from './services/accessStore.js'
 import { log } from './lib/log.js'
 
@@ -36,6 +37,7 @@ export function createApp({ store, subscriptions = null, mainApi, config, missin
     app.use('/api', (_req, res) => res.status(503).json({ error: `Admin server not configured: ${missing.join(', ')}` }))
   } else {
     const auth = makeAuth(store)
+    app.use('/api/auth', authRoutes({ store, config }))   // public: admin-only password reset
     app.use('/api/me', meRoutes({ auth, store }))
     app.use('/api/access', accessRoutes({ auth, store }))
     app.use('/api/admin', adminRoutes({ auth, mainApi }))

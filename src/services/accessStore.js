@@ -167,6 +167,22 @@ export function createAccessStore(supabase, config) {
     return { userId: user.id, email: user.email, name, role: 'admin', domains, created: true, newAccount: true }
   }
 
+  /**
+   * "Forgot password?" on the admin panel: send Supabase's reset email ONLY when the email belongs to an
+   * admin or super admin. Returns { sent } for logging; the route always answers the same generic message
+   * so nobody can use it to find out which emails are admins.
+   */
+  async function sendAdminPasswordReset(email, redirectTo) {
+    const user = await findUserByEmail(email)
+    if (!user) return { sent: false, reason: 'no-account' }
+    const access = await getAccess(user)
+    if (!['admin', 'super_admin'].includes(access.role)) return { sent: false, reason: 'not-admin' }
+    if (!config.supabasePublishableKey) return { sent: false, reason: 'no-publishable-key' }
+    const anon = createClient(config.supabaseUrl, config.supabasePublishableKey, { auth: { persistSession: false, autoRefreshToken: false } })
+    const { error } = await anon.auth.resetPasswordForEmail(user.email, { redirectTo })
+    return error ? { sent: false, reason: 'supabase', message: error.message } : { sent: true }
+  }
+
   /** True if `password` is the account's CURRENT password (used to stop re-using the temporary one). */
   async function isCurrentPassword(email, password) {
     if (!config.supabasePublishableKey) return false
@@ -179,7 +195,7 @@ export function createAccessStore(supabase, config) {
   /** Admin replaces their temporary password with a permanent one and the flag is cleared. */
   async function setPermanentPassword(user, password) {
     if (await isCurrentPassword(user.email, password)) {
-      throw new AccessError(400, 'Choose a new password — it can’t be the temporary one you were given.')
+      throw new AccessError(400, 'Choose a new password — it can’t be the same as your current one.')
     }
     const { error } = await supabase.auth.admin.updateUserById(user.id, {
       password, app_metadata: { must_change_password: false },
@@ -207,5 +223,5 @@ export function createAccessStore(supabase, config) {
     return data[0]
   }
 
-  return { getUserFromToken, getAccess, searchUsers, listAdmins, grantAdmin, createAdmin, setPermanentPassword, updateDomains, revokeAdmin }
+  return { getUserFromToken, getAccess, searchUsers, listAdmins, grantAdmin, createAdmin, setPermanentPassword, sendAdminPasswordReset, updateDomains, revokeAdmin }
 }

@@ -1,5 +1,13 @@
 import { ADMIN_MODULES, domainOfExam } from '../config/domains.js'
 
+/** Auth methods recorded in a Supabase access token (amr claim), e.g. ['password'] or ['recovery']. */
+export function tokenAuthMethods(token) {
+  try {
+    const payload = JSON.parse(Buffer.from(String(token).split('.')[1], 'base64url').toString('utf8'))
+    return (payload.amr || []).map((a) => (typeof a === 'string' ? a : a?.method)).filter(Boolean)
+  } catch { return [] }
+}
+
 /** Verifies the Supabase access token and attaches req.user + req.access. */
 export function makeAuth(store) {
   async function requireAuth(req, res, next) {
@@ -12,7 +20,10 @@ export function makeAuth(store) {
       const access = await store.getAccess(user)
       // Set by createAdmin: the account still has the TEMPORARY password from the super admin.
       const mustChangePassword = !!user.app_metadata?.must_change_password
-      req.user = { id: user.id, email: user.email, mustChangePassword }
+      // Signed in through a "Forgot password?" email link → Supabase puts { method: 'recovery' } in the
+      // token's amr claim (the token itself was already verified by getUserFromToken above).
+      const recovery = tokenAuthMethods(token).includes('recovery')
+      req.user = { id: user.id, email: user.email, mustChangePassword, recovery }
       req.access = { ...access, modules: ADMIN_MODULES[access.role] || [] }
       next()
     } catch (err) { next(err) }

@@ -16,6 +16,7 @@ const calls = []
 const store = {
   getUserFromToken: async (t) => USERS[t] ? { id: USERS[t].id, email: USERS[t].email, app_metadata: { must_change_password: !!USERS[t].temp } } : null,
   setPermanentPassword: async (u, p) => { calls.push(['pw', u.email, p]); return { ok: true } },
+  sendAdminPasswordReset: async (email, redirectTo) => { calls.push(['reset', email, redirectTo]); return { sent: email.endsWith('@arkaserve.com') } },
   getAccess: async (u) => Object.values(USERS).find((x) => x.id === u.id).access,
   listAdmins: async () => [{ email: 'bank@arkaserve.com', role: 'admin', domains: ['banking'] }],
   searchUsers: async () => [],
@@ -226,3 +227,40 @@ test('temporary password: set-password validates and is only for flagged account
   assert.deepEqual(calls.find((c) => c[0] === 'pw'), ['pw', 'temp@arkaserve.com', 'MyNewPass2026'])
 })
 
+
+// ── Forgot password (admin accounts only, same answer for everyone) ────────
+test('forgot password: same message for admin and non-admin, validated, uses an allowed origin', async () => {
+  const send = (email, origin) => fetch(base + '/api/auth/forgot-password', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...(origin ? { Origin: origin } : {}) }, body: JSON.stringify({ email }) })
+  const a = await send('Bank@Arkaserve.com', 'http://localhost:3000')
+  const b = await send('kid@gmail.com', 'https://evil.example')
+  assert.equal(a.status, 200); assert.equal(b.status, 200)
+  assert.equal((await a.json()).message, (await b.json()).message)          // no way to tell admins apart
+  const resets = calls.filter((c) => c[0] === 'reset')
+  assert.deepEqual(resets[0], ['reset', 'bank@arkaserve.com', 'http://localhost:3000'])
+  assert.deepEqual(resets[1], ['reset', 'kid@gmail.com', 'http://localhost:3000'])  // unknown origin → first allowed origin
+  assert.equal((await send('not-an-email')).status, 400)
+})
+
+test('forgot password: rate limited to 5 per 15 minutes', async () => {
+  let last
+  for (let i = 0; i < 6; i++) last = await fetch(base + '/api/auth/forgot-password', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'x@y.com' }) })
+  assert.equal(last.status, 429)
+})
+
+// ── Reset link ("recovery" sign-in) may set a new password ─────────────────
+import { tokenAuthMethods } from '../src/middleware/auth.js'
+test('recovery sign-in (amr=recovery) may set a new password; normal sign-in may not', async () => {
+  const jwt = (amr) => `h.${Buffer.from(JSON.stringify({ amr })).toString('base64url')}.s`
+  const recTok = jwt([{ method: 'recovery', timestamp: 1 }])
+  const pwTok = jwt([{ method: 'password', timestamp: 1 }])
+  assert.deepEqual(tokenAuthMethods(recTok), ['recovery'])
+  assert.deepEqual(tokenAuthMethods('not-a-jwt'), [])
+  const bank = USERS['tok-banking']
+  USERS[recTok] = { ...bank }; USERS[pwTok] = { ...bank }
+  const set = (token) => call('/api/me/password', { token, method: 'POST', body: { password: 'Recover2026' } })
+  assert.equal((await set(pwTok)).status, 400)                                  // already has a password
+  assert.equal((await set(recTok)).status, 200)
+  assert.deepEqual(calls.filter((c) => c[0] === 'pw').at(-1), ['pw', 'bank@arkaserve.com', 'Recover2026'])
+})

@@ -19,12 +19,14 @@ export function meRoutes({ auth, store }) {
       domains: req.access.domains,
       modules: req.access.modules,
       mustChangePassword: req.user.mustChangePassword,
+      recovery: req.user.recovery,
     })
   })
 
-  /** POST /api/me/password { password } → replace the TEMPORARY password with a permanent one (only while required). */
+  /** POST /api/me/password { password } → set a new password: replaces the TEMPORARY one, or after a reset link. */
   r.post('/password', auth.requireAuth, async (req, res, next) => {
-    if (!req.user.mustChangePassword) return res.status(400).json({ error: 'Your password is already set. Use "Forgot password?" on the sign-in page to change it.' })
+    // Allowed while on the temporary password from the super admin, or when signed in via a reset link.
+    if (!req.user.mustChangePassword && !req.user.recovery) return res.status(400).json({ error: 'Your password is already set. Use "Forgot password?" on the sign-in page to change it.' })
     const parsed = passwordSchema.safeParse(req.body)
     if (!parsed.success) return res.status(400).json({ error: parsed.error.issues?.[0]?.message || 'Invalid password' })
     try {
