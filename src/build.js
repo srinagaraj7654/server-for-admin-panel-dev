@@ -7,6 +7,8 @@ import { createAccessStore } from './services/accessStore.js'
 import { createSubscriptionStore } from './services/subscriptionStore.js'
 import { createAuthService } from './services/authService.js'
 import { createStudentStore } from './services/studentStore.js'
+import { createCashfree } from './services/cashfree.js'
+import { createPaymentStore } from './services/paymentStore.js'
 import { createApp } from './app.js'
 
 export function buildServer() {
@@ -17,7 +19,9 @@ export function buildServer() {
   const subscriptions = supabase ? createSubscriptionStore(supabase, config) : null
   const authService = supabase ? createAuthService(supabase, config) : null
   const students = supabase ? createStudentStore(supabase) : null
+  const payments = supabase && config.cashfree.appId && config.cashfree.secret
+    ? createPaymentStore({ supabase, cashfree: createCashfree(config.cashfree), students }) : null
   const mainApi = createMainApi(config)
-  const app = createApp({ store, subscriptions, authService, students, mainApi, config, missing })
+  const app = createApp({ store, subscriptions, authService, students, payments, mainApi, config, missing })
   return { app, config, missing }
 }

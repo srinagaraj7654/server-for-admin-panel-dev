@@ -61,6 +61,17 @@ const students = new Proxy({}, { get: (_t, name) => async (...args) => {
   if (name === 'saveAvatar') return { url: 'https://x/avatar.png', user: {} }
   return { ok: true, user: { id: args[0] } }
 } })
+// fake Cashfree payments (real webhook signature check with a test secret)
+import { createCashfree } from '../src/services/cashfree.js'
+const cfReal = createCashfree({ appId: 'x', secret: 'whsec_test', env: 'sandbox' }, async () => { throw new Error('no network in tests') })
+const ORDERS = {}
+const payments = {
+  mode: 'sandbox',
+  createOrder: async (o) => { calls.push(['cf-create', o]); const id = 'mt_' + o.planId + '_' + o.userId.slice(0, 8) + '_1700000000000'; ORDERS[id] = { order_tags: { user_id: o.userId, plan: o.planId } }; return { order_id: id, payment_session_id: 'sess_123', mode: 'sandbox' } },
+  getOrder: async (id) => ORDERS[id] || { order_tags: {} },
+  activate: async (id) => { calls.push(['cf-activate', id]); return { status: 'ok', plan: ORDERS[id]?.order_tags?.plan, user: { id: 'u' } } },
+  verifyWebhook: (raw, ts, sig) => cfReal.verifyWebhook(raw, ts, sig),
+}
 const subscriptions = {
   listSubscribers: async () => ({ subscribers: [{ id: 'u1', plan: 'pro' }], writable: false }),
   updateSubscription: async (id, c) => { calls.push(['sub', id, c]); return { userId: id, action: 'update' } },
@@ -69,7 +80,7 @@ const config = { allowedOrigins: ['http://localhost:3000'] }
 
 let server, base
 before(async () => {
-  server = createApp({ store, subscriptions, authService, students, mainApi, config }).listen(0)
+  server = createApp({ store, subscriptions, authService, students, payments, mainApi, config }).listen(0)
   await new Promise((r) => server.once('listening', r))
   base = `http://127.0.0.1:${server.address().port}`
 })
@@ -417,4 +428,77 @@ test('avatar: images only, 4 MB max', async () => {
   assert.equal(lastCall('saveAvatar')[2].ext, 'png')
   assert.equal((await up('application/pdf', 1000)).status, 400)
   assert.equal((await up('image/png', 5 * 1024 * 1024)).status, 413)
+})
+
+// ── Cashfree payments ──────────────────────────────────────────────────────
+import crypto from 'node:crypto'
+import { activateOrder } from '../src/services/paymentStore.js'
+
+test('cashfree order: sign-in required, plan validated, browser price ignored, return URL on an allowed site', async () => {
+  assert.equal((await call('/api/payments/cashfree/order', { method: 'POST', body: { plan: 'pro' } })).status, 401)
+  assert.equal((await call('/api/payments/cashfree/order', { token: 'tok-student', method: 'POST', body: { plan: 'gold' } })).status, 400)
+  const r = await call('/api/payments/cashfree/order', { token: 'tok-student', method: 'POST', body: { plan: 'pro', amount: 1 } })
+  assert.equal(r.status, 200)
+  const j = await r.json(); assert.equal(j.payment_session_id, 'sess_123'); assert.equal(j.mode, 'sandbox')
+  const [, o] = calls.filter((c) => c[0] === 'cf-create').at(-1)
+  assert.equal(o.planId, 'pro'); assert.equal(o.userId, USERS['tok-student'].id); assert.equal(o.amount, undefined)
+  assert.equal(o.returnUrl, 'http://localhost:3000/?sub=cf&order_id=ORDER_ID')
+})
+
+test('cashfree verify: own order only, then activation', async () => {
+  const mine = 'mt_pro_' + USERS['tok-student'].id.slice(0, 8) + '_1700000000000'
+  assert.equal((await call('/api/payments/cashfree/verify', { token: 'tok-banking', method: 'POST', body: { order_id: mine } })).status, 403)
+  assert.equal((await call('/api/payments/cashfree/verify', { token: 'tok-student', method: 'POST', body: { order_id: 'bad id' } })).status, 400)
+  const ok = await call('/api/payments/cashfree/verify', { token: 'tok-student', method: 'POST', body: { order_id: mine } })
+  assert.equal(ok.status, 200); assert.deepEqual((await ok.json()).ok, true)
+})
+
+test('cashfree webhook: valid signature activates, forged one is refused', async () => {
+  const raw = JSON.stringify({ type: 'PAYMENT_SUCCESS_WEBHOOK', data: { order: { order_id: 'mt_pro_abcdef12_1' } } })
+  const ts = '1700000000'
+  const sig = crypto.createHmac('sha256', 'whsec_test').update(ts + raw).digest('base64')
+  const send = (signature) => fetch(base + '/api/payments/cashfree/webhook', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-webhook-timestamp': ts, 'x-webhook-signature': signature }, body: raw })
+  assert.equal((await send('forged')).status, 401)
+  assert.ok(!calls.some((c) => c[0] === 'cf-activate' && c[1] === 'mt_pro_abcdef12_1'))
+  assert.equal((await send(sig)).status, 200)
+  assert.ok(calls.some((c) => c[0] === 'cf-activate' && c[1] === 'mt_pro_abcdef12_1'))
+})
+
+test('cashfree off (no keys) → 503 so the website falls back to Stripe', async () => {
+  const srv = createApp({ store, subscriptions, authService, students, payments: null, mainApi, config }).listen(0)
+  await new Promise((r) => srv.once('listening', r))
+  const r = await fetch(`http://127.0.0.1:${srv.address().port}/api/payments/cashfree/order`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer tok-student' }, body: JSON.stringify({ plan: 'pro' }) })
+  srv.close()
+  assert.equal(r.status, 503); assert.equal((await r.json()).code, 'CASHFREE_OFF')
+})
+
+test('activateOrder: only PAID + right amount; once per order', async () => {
+  const rows = []
+  const mk = (order) => ({
+    cashfree: { getOrder: async () => order, getPayments: async () => [{ payment_status: 'SUCCESS', cf_payment_id: 555 }] },
+    findByOrderId: async (id) => rows.find((r) => r.cashfree_order_id === id) || null,
+    insertSubscription: async (row) => { rows.push(row); return true },
+    syncPlan: async (uid) => ({ id: uid, user_metadata: { plan: 'pro' } }),
+    now: () => new Date('2026-11-19T00:00:00Z'),
+  })
+  const paid = { order_status: 'PAID', order_amount: 499, order_currency: 'INR', order_tags: { user_id: 'u1', plan: 'pro' } }
+  assert.equal((await activateOrder(mk({ ...paid, order_status: 'ACTIVE' }), 'o1')).status, 'pending')
+  assert.equal((await activateOrder(mk({ ...paid, order_status: 'EXPIRED' }), 'o1')).status, 'failed')
+  await assert.rejects(activateOrder(mk({ ...paid, order_amount: 1 }), 'o1'), /does not match/)
+  const first = await activateOrder(mk(paid), 'o1')
+  assert.equal(first.status, 'ok'); assert.equal(rows.length, 1)
+  assert.equal(rows[0].period_end, '2026-12-19T00:00:00.000Z'); assert.equal(rows[0].cashfree_payment_id, '555'); assert.equal(rows[0].amount, 499)
+  const second = await activateOrder(mk(paid), 'o1')                                   // verify + webhook both arrive
+  assert.equal(second.already, true); assert.equal(rows.length, 1)                    // still one subscription
+})
+
+test('cashfree client: sandbox URL + headers; webhook signature check', async () => {
+  let seen
+  const cf = createCashfree({ appId: 'APP', secret: 'SEC', env: 'sandbox' }, async (url, init) => { seen = { url, init }; return { ok: true, json: async () => ({ order_id: 'mt_x', payment_session_id: 'ps' }) } })
+  await cf.createOrder({ order_id: 'mt_x' })
+  assert.equal(seen.url, 'https://sandbox.cashfree.com/pg/orders'); assert.equal(seen.init.headers['x-client-id'], 'APP'); assert.equal(seen.init.headers['x-api-version'], '2023-08-01')
+  assert.equal(createCashfree({ appId: 'a', secret: 'b', env: 'production' }).mode, 'production')
+  const sig = crypto.createHmac('sha256', 'SEC').update('123' + '{"a":1}').digest('base64')
+  assert.equal(cf.verifyWebhook('{"a":1}', '123', sig), true)
+  assert.equal(cf.verifyWebhook('{"a":2}', '123', sig), false)
 })

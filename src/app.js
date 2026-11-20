@@ -9,6 +9,7 @@ import { adminRoutes } from './routes/admin.js'
 import { subscriptionRoutes } from './routes/subscriptions.js'
 import { authRoutes } from './routes/auth.js'
 import { studentRoutes, publicRoutes } from './routes/student.js'
+import { paymentRoutes } from './routes/payments.js'
 import { AccessError } from './services/accessStore.js'
 import { log } from './lib/log.js'
 
@@ -19,7 +20,7 @@ import { log } from './lib/log.js'
  *   config  — loadConfig() result
  *   missing — list of missing env settings (shown by /health)
  */
-export function createApp({ store, subscriptions = null, authService = null, students = null, mainApi, config, missing = [] }) {
+export function createApp({ store, subscriptions = null, authService = null, students = null, payments = null, mainApi, config, missing = [] }) {
   const app = express()
   app.disable('x-powered-by')
   app.set('trust proxy', 1)
@@ -29,7 +30,11 @@ export function createApp({ store, subscriptions = null, authService = null, stu
     allowedHeaders: ['Content-Type', 'Authorization'],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
   }))
-  app.use(express.json({ limit: '4mb' }))   // big test results (result_json); Vercel's request limit is 4.5 MB
+  app.use(express.json({
+    limit: '4mb',
+    // keep the raw body for the Cashfree webhook signature check
+    verify: (req, _res, buf) => { if (req.originalUrl.startsWith('/api/payments/cashfree/webhook')) req.rawBody = buf.toString('utf8') },
+  }))   // big test results (result_json); Vercel's request limit is 4.5 MB
   app.use('/api', rateLimit({ windowMs: 60_000, limit: 300, standardHeaders: 'draft-7', legacyHeaders: false }))
 
   app.get('/health', (_req, res) => res.json({ ok: true, service: 'mocktest-admin-access', missingConfig: missing }))
@@ -41,7 +46,8 @@ export function createApp({ store, subscriptions = null, authService = null, stu
     app.use('/api/auth', authRoutes({ store, config, authService, auth }))   // sign-in, session, passwords, Google/Apple
     app.use('/api/me', meRoutes({ auth, store }))
     if (students) app.use('/api/me', studentRoutes({ auth, students }))      // website data (own rows only)
-    if (students) app.use('/api/public', publicRoutes({ students }))         // logged-out pages
+    if (students) app.use('/api/public', publicRoutes({ students }))
+    app.use('/api/payments', paymentRoutes({ auth, payments, config }))     // Cashfree (503 when not configured)         // logged-out pages
     app.use('/api/access', accessRoutes({ auth, store }))
     app.use('/api/admin', adminRoutes({ auth, mainApi }))
     if (subscriptions) app.use('/api/subscriptions', subscriptionRoutes({ auth, subscriptions }))   // super admin only
