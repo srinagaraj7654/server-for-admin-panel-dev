@@ -18,6 +18,7 @@ const metadataSchema = z.object({
   dob: z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date of birth must be yyyy-mm-dd'), z.literal(''), z.null()]),
   gender: str(30), referral_source: str(100), category: str(20), state: str(60), level: str(30),
   notif_off_subs: z.boolean(), notif_off_promo: z.boolean(),
+  welcome_guide_done: z.boolean(),                       // first-time welcome guide finished (website)
 }).partial().strict()
 
 // Unknown keys are dropped (strip) — e.g. a student_id sent by the browser is ignored; the server sets it.

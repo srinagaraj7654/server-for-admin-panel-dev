@@ -502,3 +502,11 @@ test('cashfree client: sandbox URL + headers; webhook signature check', async ()
   assert.equal(cf.verifyWebhook('{"a":1}', '123', sig), true)
   assert.equal(cf.verifyWebhook('{"a":2}', '123', sig), false)
 })
+
+test("metadata: welcome guide flag + phone accepted, still no plan", async () => {
+  const ok = await call("/api/me/metadata", { token: "tok-student", method: "PATCH", body: { phone: "+91 98765 43210", welcome_guide_done: true } })
+  assert.equal(ok.status, 200)
+  assert.deepEqual(calls.filter((c) => c[0] === "students.updateMetadata").at(-1)[2], { phone: "+91 98765 43210", welcome_guide_done: true })
+  assert.equal((await call("/api/me/metadata", { token: "tok-student", method: "PATCH", body: { welcome_guide_done: true, plan: "pro" } })).status, 400)
+  assert.equal((await call("/api/me/metadata", { token: "tok-student", method: "PATCH", body: { welcome_guide_done: "yes" } })).status, 400)
+})
